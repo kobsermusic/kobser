@@ -1,0 +1,451 @@
+<script>
+  import { library as libApi, importSpotify } from '../lib/api.js';
+  import TrackList from '../components/TrackList.svelte';
+  import { showContextMenu } from '../lib/stores/contextMenuStore.js';
+  import { activeImport, startImport as startImportTracking, clearImport } from '../lib/stores/importStore.js';
+
+  let stack = [{ type: 'playlists', label: 'Playlists' }];
+  let playlists = [];
+  let playlistFilter = '';
+  let songs = [];
+  let loading = true;
+  let error = '';
+
+  // Dialogs
+  let createOpen = false;
+  let createName = '';
+  let createDialogEl;
+  let renameOpen = false;
+  let renameId = '';
+  let renameCurrentName = '';
+  let renameName = '';
+  let renameDialogEl;
+  let songPickerOpen = false;
+  let songPickerPlaylistId = '';
+  let songPickerPlaylistName = '';
+  let spAllSongs = [];
+  let spFilter = '';
+  let spSelected = new Set();
+  let spDialogEl;
+  let spLoading = false;
+
+  // Import playlist
+  let importOpen = false;
+  let importDialogEl;
+  let importStep = 'source';   // 'source' | 'url' | 'progress'
+  let importSource = '';
+  let importUrl = '';
+  let importError = '';
+  let reloadedFor = null;      // import id we've already refreshed playlists for
+
+  // When the tracked import finishes, refresh the playlist list once.
+  $: if ($activeImport?.status === 'done' && reloadedFor !== $activeImport.importId) {
+    reloadedFor = $activeImport.importId;
+    loadPlaylists();
+  }
+
+  $: top = stack[stack.length - 1];
+  $: filteredPlaylists = playlistFilter
+    ? playlists.filter(p => p.name.toLowerCase().includes(playlistFilter.toLowerCase()))
+    : playlists;
+  $: spFiltered = spFilter
+    ? spAllSongs.filter(s => (s.title || '').toLowerCase().includes(spFilter.toLowerCase()) || (s.artist || '').toLowerCase().includes(spFilter.toLowerCase()))
+    : spAllSongs;
+
+  $: top, loadCurrent();
+
+  async function loadCurrent() {
+    loading = true; error = '';
+    try {
+      if (top.type === 'playlists') await loadPlaylists();
+      else if (top.type === 'playlist') await loadPlaylist(top.id);
+    } catch (e) { error = e.message; }
+    finally { loading = false; }
+  }
+
+  async function loadPlaylists() {
+    const r = await libApi('getPlaylists');
+    playlists = r.playlists?.playlist || [];
+    playlistFilter = '';
+  }
+
+  async function loadPlaylist(id) {
+    const r = await libApi('getPlaylist', { id });
+    songs = r.playlist?.entry || [];
+  }
+
+  function push(item) { stack = [...stack, item]; }
+  function goTo(idx) { stack = stack.slice(0, idx + 1); }
+
+  function openDots(e, p) {
+    e.stopPropagation();
+    showContextMenu(e.currentTarget, [
+      {
+        label: 'Add songs', icon: 'ph ph-plus-circle',
+        action: () => openSongPicker(p.id, p.name),
+      },
+      {
+        label: 'Rename', icon: 'ph ph-pencil',
+        action: () => { renameId = p.id; renameCurrentName = p.name; renameName = p.name; renameOpen = true; renameDialogEl?.showModal(); },
+      },
+      null,
+      {
+        label: 'Delete', icon: 'ph ph-trash', danger: true,
+        action: async () => {
+          if (!confirm(`Delete "${p.name}"?`)) return;
+          await libApi('deletePlaylist', { id: p.id });
+          await loadPlaylists();
+        },
+      },
+    ]);
+  }
+
+  async function createPlaylist() {
+    const name = createName.trim();
+    if (!name) return;
+    await libApi('createPlaylist', { name });
+    createDialogEl?.close();
+    createOpen = false;
+    createName = '';
+    await loadPlaylists();
+  }
+
+  async function renamePlaylist() {
+    const name = renameName.trim();
+    if (!name || name === renameCurrentName) { renameDialogEl?.close(); renameOpen = false; return; }
+    await libApi('updatePlaylist', { playlistId: renameId, name });
+    renameDialogEl?.close();
+    renameOpen = false;
+    await loadPlaylists();
+  }
+
+  async function openSongPicker(plId, plName) {
+    songPickerPlaylistId = plId;
+    songPickerPlaylistName = plName;
+    spSelected = new Set();
+    spFilter = '';
+    spLoading = true;
+    songPickerOpen = true;
+    spDialogEl?.showModal();
+    try {
+      let all = [];
+      let offset = 0;
+      while (true) {
+        const r = await libApi('search3', { query: ' ', songCount: 500, songOffset: offset, artistCount: 0, albumCount: 0 });
+        const batch = r.searchResult3?.song || [];
+        all.push(...batch);
+        if (batch.length < 500) break;
+        offset += 500;
+      }
+      all.sort((a, b) => (a.artist || '').localeCompare(b.artist || '') || (a.title || '').localeCompare(b.title || ''));
+      spAllSongs = all;
+    } catch (e) { spAllSongs = []; }
+    finally { spLoading = false; }
+  }
+
+  async function confirmSongPicker() {
+    const ids = [...spSelected];
+    if (!ids.length) return;
+    try {
+      await libApi('updatePlaylist', { playlistId: songPickerPlaylistId, songIdToAdd: ids });
+      spDialogEl?.close();
+      songPickerOpen = false;
+      if (top.type === 'playlist' && top.id === songPickerPlaylistId) await loadPlaylist(top.id);
+    } catch (e) { alert(`Failed to add songs: ${e.message}`); }
+  }
+
+  function openImport() {
+    // If an import is already running, jump straight to its progress.
+    importStep = $activeImport ? 'progress' : 'source';
+    importSource = '';
+    importUrl = '';
+    importError = '';
+    importOpen = true;
+    importDialogEl?.showModal();
+  }
+
+  // Only hide the dialog. The import keeps running and stays tracked in the store.
+  function hideImport() {
+    importDialogEl?.close();
+    importOpen = false;
+  }
+
+  // On Done or dismiss, stop tracking the import and close the dialog.
+  function finishImport() {
+    clearImport();
+    reloadedFor = null;
+    hideImport();
+  }
+
+  function reopenImport() {
+    importStep = 'progress';
+    importError = '';
+    importOpen = true;
+    importDialogEl?.showModal();
+  }
+
+  function pickSource(src) {
+    importSource = src;
+    importStep = 'url';
+  }
+
+  async function startImport() {
+    const url = importUrl.trim();
+    if (!url) return;
+    importError = '';
+    try {
+      const res = await importSpotify(url);
+      startImportTracking(res.importId, res.name, res.total);
+      importStep = 'progress';
+    } catch (e) {
+      importError = e.message;
+    }
+  }
+</script>
+
+<div class="w-full max-w-5xl mx-auto p-4 md:p-8">
+  <h2 class="font-london text-3xl mb-6">Playlists</h2>
+
+  <!-- Breadcrumb -->
+  {#if stack.length > 1}
+    <div class="flex items-center gap-2 text-sm text-kobser-muted mb-6 flex-wrap">
+      {#each stack as crumb, i}
+        {#if i < stack.length - 1}
+          <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+          <span class="cursor-pointer hover:text-kobser-text transition-colors" on:click={() => goTo(i)} role="link" tabindex="0">{crumb.label}</span>
+          <i class="ph ph-caret-right text-xs"></i>
+        {:else}
+          <span class="text-kobser-text font-medium">{crumb.label}</span>
+        {/if}
+      {/each}
+    </div>
+  {/if}
+
+  {#if loading}
+    <div class="flex items-center justify-center py-20 opacity-50">
+      <i class="ph ph-circle-notch text-4xl animate-spin-slow"></i>
+    </div>
+  {:else if error}
+    <div class="flex flex-col items-center justify-center py-20 text-red-400">
+      <i class="ph ph-warning-circle text-5xl mb-4"></i><p>{error}</p>
+    </div>
+  {:else if top.type === 'playlists'}
+    <div class="flex items-center gap-2 mb-4 flex-wrap">
+      <div class="relative flex-1 min-w-48">
+        <i class="ph ph-magnifying-glass absolute left-4 top-1/2 -translate-y-1/2 text-kobser-muted"></i>
+        <input type="text" bind:value={playlistFilter} placeholder="Search playlists…"
+          class="w-full bg-kobser-surface text-kobser-text placeholder-kobser-muted rounded-xl py-2.5 pl-11 pr-4 focus:outline-hidden focus:ring-2 focus:ring-kobser-accent/50 border border-white/10 text-sm">
+      </div>
+      <button on:click={openImport}
+        class="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 text-sm font-semibold rounded-xl transition-colors shrink-0">
+        <i class="ph ph-download-simple"></i> Import
+      </button>
+      <button on:click={() => { createName = ''; createOpen = true; createDialogEl?.showModal(); }}
+        class="flex items-center gap-2 px-4 py-2 bg-kobser-accent hover:bg-kobser-accentHover text-kobser-bg text-sm font-semibold rounded-xl transition-colors shrink-0">
+        <i class="ph-bold ph-plus"></i> New playlist
+      </button>
+    </div>
+    <div class="flex flex-col gap-2">
+      {#if !filteredPlaylists.length}
+        <div class="flex flex-col items-center justify-center py-20 opacity-50">
+          <i class="ph ph-playlist text-6xl mb-4"></i>
+          <p class="text-lg">No playlists yet.</p>
+        </div>
+      {:else}
+        {#each filteredPlaylists as p}
+          <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+          <div class="group flex items-center gap-4 p-3 rounded-xl hover:bg-white/5 transition-all cursor-pointer"
+               on:click={() => push({ type: 'playlist', id: p.id, label: p.name })} role="row">
+            <div class="w-12 h-12 rounded-xl bg-kobser-surface flex items-center justify-center shrink-0">
+              <i class="ph-fill ph-playlist text-kobser-muted text-2xl"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+              <p class="font-medium truncate">{p.name}</p>
+              <p class="text-sm text-kobser-muted">{p.songCount || 0} track{p.songCount === 1 ? '' : 's'}</p>
+            </div>
+            <button class="dots-btn w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 text-kobser-muted opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                    on:click={e => openDots(e, p)} title="More options">
+              <i class="ph ph-dots-three-vertical text-lg pointer-events-none"></i>
+            </button>
+            <i class="ph ph-caret-right text-kobser-muted opacity-0 group-hover:opacity-100 transition-opacity"></i>
+          </div>
+        {/each}
+      {/if}
+    </div>
+  {:else if top.type === 'playlist'}
+    <div class="flex justify-end mb-2">
+      <button on:click={() => openSongPicker(top.id, top.label)}
+        class="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 text-sm font-medium rounded-xl transition-colors">
+        <i class="ph ph-plus text-sm"></i> Add songs
+      </button>
+    </div>
+    {#if !songs.length}
+      <p class="text-center py-12 text-kobser-muted">No tracks yet. Add some!</p>
+    {:else}
+      <TrackList {songs} playlistId={top.id} onRefresh={() => loadPlaylist(top.id)} />
+    {/if}
+  {/if}
+</div>
+
+<!-- Create playlist dialog -->
+<dialog bind:this={createDialogEl} on:close={() => { createOpen = false; }}
+  class="bg-kobser-surface text-kobser-text border border-white/10 rounded-2xl p-6 min-w-[320px] max-w-[90vw] shadow-2xl backdrop:bg-black/70 backdrop:backdrop-blur-xs">
+  <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
+    <i class="ph-fill ph-playlist text-kobser-accent"></i> New playlist
+  </h3>
+  <input type="text" bind:value={createName} placeholder="Playlist name" autofocus
+    on:keydown={e => { if (e.key === 'Enter') createPlaylist(); }}
+    class="w-full bg-kobser-bg text-kobser-text placeholder-kobser-muted rounded-xl py-3 px-4 mb-5 focus:outline-hidden focus:ring-2 focus:ring-kobser-accent/50 border border-white/10">
+  <div class="flex gap-3 justify-end">
+    <button on:click={() => createDialogEl?.close()} class="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-colors">Cancel</button>
+    <button on:click={createPlaylist} class="px-5 py-2.5 bg-kobser-accent hover:bg-kobser-accentHover text-kobser-bg rounded-xl text-sm font-semibold transition-colors">Create</button>
+  </div>
+</dialog>
+
+<!-- Rename dialog -->
+<dialog bind:this={renameDialogEl} on:close={() => { renameOpen = false; }}
+  class="bg-kobser-surface text-kobser-text border border-white/10 rounded-2xl p-6 min-w-[320px] max-w-[90vw] shadow-2xl backdrop:bg-black/70 backdrop:backdrop-blur-xs">
+  <h3 class="text-lg font-semibold mb-4">Rename playlist</h3>
+  <input type="text" bind:value={renameName}
+    on:keydown={e => { if (e.key === 'Enter') renamePlaylist(); }}
+    class="w-full bg-kobser-bg text-kobser-text placeholder-kobser-muted rounded-xl py-3 px-4 mb-5 focus:outline-hidden focus:ring-2 focus:ring-kobser-accent/50 border border-white/10">
+  <div class="flex gap-3 justify-end">
+    <button on:click={() => renameDialogEl?.close()} class="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-colors">Cancel</button>
+    <button on:click={renamePlaylist} class="px-5 py-2.5 bg-kobser-accent hover:bg-kobser-accentHover text-kobser-bg rounded-xl text-sm font-semibold transition-colors">Save</button>
+  </div>
+</dialog>
+
+<!-- Song picker dialog -->
+<dialog bind:this={spDialogEl} on:close={() => { songPickerOpen = false; }}
+  class="bg-kobser-surface text-kobser-text border border-white/10 rounded-2xl p-0 w-[90vw] max-w-lg shadow-2xl backdrop:bg-black/70 backdrop:backdrop-blur-xs overflow-hidden">
+  <div class="flex flex-col max-h-[80vh]">
+  <div class="p-5 border-b border-white/10 shrink-0">
+    <h3 class="text-base font-semibold mb-3 flex items-center gap-2">
+      <i class="ph-fill ph-music-notes-plus text-kobser-accent"></i>
+      Add songs to "{songPickerPlaylistName}"
+    </h3>
+    <input type="text" bind:value={spFilter} placeholder="Search by title or artist…"
+      class="w-full bg-kobser-bg text-kobser-text placeholder-kobser-muted rounded-xl py-2.5 px-4 focus:outline-hidden focus:ring-2 focus:ring-kobser-accent/50 border border-white/10 text-sm">
+  </div>
+  <div class="overflow-y-auto flex-1">
+    {#if spLoading}
+      <div class="flex items-center justify-center py-16 opacity-50"><i class="ph ph-circle-notch text-3xl animate-spin-slow"></i></div>
+    {:else if !spFiltered.length}
+      <p class="text-center py-10 text-kobser-muted text-sm">No songs found.</p>
+    {:else}
+      {#each spFiltered as s (s.id)}
+        <label class="flex items-center gap-3 px-4 py-2.5 hover:bg-white/5 cursor-pointer transition-colors">
+          <input type="checkbox" checked={spSelected.has(s.id)}
+            on:change={e => { const sel = new Set(spSelected); e.target.checked ? sel.add(s.id) : sel.delete(s.id); spSelected = sel; }}
+            class="w-4 h-4 rounded-sm accent-kobser-accent shrink-0 cursor-pointer">
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-medium truncate">{s.title || '—'}</p>
+            <p class="text-xs text-kobser-muted truncate">{s.artist || '—'}</p>
+          </div>
+        </label>
+      {/each}
+    {/if}
+  </div>
+  <div class="p-4 border-t border-white/10 flex items-center justify-between gap-3 shrink-0">
+    <span class="text-sm text-kobser-muted">{spSelected.size} selected</span>
+    <div class="flex gap-2">
+      <button on:click={() => spDialogEl?.close()} class="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-colors">Cancel</button>
+      <button on:click={confirmSongPicker} disabled={spSelected.size === 0}
+        class="px-4 py-2 bg-kobser-accent hover:bg-kobser-accentHover text-kobser-bg rounded-xl text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+        {spSelected.size ? `Add ${spSelected.size} song${spSelected.size !== 1 ? 's' : ''}` : 'Add'}
+      </button>
+    </div>
+  </div>
+  </div>
+</dialog>
+
+<!-- Import playlist dialog -->
+<dialog bind:this={importDialogEl} on:close={() => { importOpen = false; }}
+  class="bg-kobser-surface text-kobser-text border border-white/10 rounded-2xl p-6 w-[90vw] max-w-md shadow-2xl backdrop:bg-black/70 backdrop:backdrop-blur-xs">
+  <h3 class="text-lg font-semibold mb-5 flex items-center gap-2">
+    <i class="ph ph-download-simple text-kobser-accent"></i> Import playlist
+  </h3>
+
+  {#if importStep === 'source'}
+    <p class="text-sm text-kobser-muted mb-4">Import from</p>
+    <button on:click={() => pickSource('spotify')}
+      class="w-full flex items-center gap-3 p-4 rounded-xl bg-white/5 hover:bg-white/10 transition-colors mb-3">
+      <i class="ph-fill ph-spotify-logo text-2xl text-[#1DB954]"></i>
+      <span class="font-medium">Spotify</span>
+      <i class="ph ph-caret-right ml-auto text-kobser-muted"></i>
+    </button>
+    <div class="flex justify-end mt-4">
+      <button on:click={hideImport} class="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-colors">Cancel</button>
+    </div>
+  {:else if importStep === 'url'}
+    <p class="text-sm text-kobser-muted mb-2">Paste a public Spotify playlist link</p>
+    <input type="text" bind:value={importUrl} placeholder="https://open.spotify.com/playlist/…" autofocus
+      on:keydown={e => { if (e.key === 'Enter') startImport(); }}
+      class="w-full bg-kobser-bg text-kobser-text placeholder-kobser-muted rounded-xl py-3 px-4 mb-2 focus:outline-hidden focus:ring-2 focus:ring-kobser-accent/50 border border-white/10">
+    {#if importError}
+      <p class="text-sm text-red-400 mb-2"><i class="ph ph-warning mr-1"></i>{importError}</p>
+    {/if}
+    <div class="flex gap-3 justify-between mt-4">
+      <button on:click={() => { importStep = 'source'; importError = ''; }} class="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-colors">Back</button>
+      <button on:click={startImport} disabled={!importUrl.trim()}
+        class="px-5 py-2.5 bg-kobser-accent hover:bg-kobser-accentHover text-kobser-bg rounded-xl text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Import</button>
+    </div>
+  {:else if importStep === 'progress'}
+    <p class="font-medium truncate mb-1">{$activeImport?.name}</p>
+    {#if $activeImport?.status === 'running'}
+      <p class="text-sm text-kobser-muted mb-3">Importing {$activeImport.current} / {$activeImport.total}…</p>
+      <div class="w-full h-2 bg-white/10 rounded-full mb-4 overflow-hidden">
+        <div class="h-full bg-kobser-accent rounded-full transition-all" style:width="{$activeImport.total ? ($activeImport.current / $activeImport.total) * 100 : 0}%"></div>
+      </div>
+      <div class="flex gap-4 text-sm text-kobser-muted">
+        <span><i class="ph ph-download-simple mr-1"></i>{$activeImport.downloaded} new</span>
+        <span><i class="ph ph-check mr-1"></i>{$activeImport.existing} existing</span>
+        {#if $activeImport.failed}<span class="text-red-400"><i class="ph ph-x mr-1"></i>{$activeImport.failed} failed</span>{/if}
+      </div>
+    {:else if $activeImport?.status === 'done'}
+      <p class="text-sm text-kobser-muted mb-3">
+        Imported {$activeImport.downloaded + $activeImport.existing} of {$activeImport.total} tracks
+        {#if $activeImport.playlistId}and created the playlist{/if}
+      </p>
+      <div class="flex gap-4 text-sm text-kobser-muted mb-2">
+        <span><i class="ph ph-download-simple mr-1"></i>{$activeImport.downloaded} downloaded</span>
+        <span><i class="ph ph-check mr-1"></i>{$activeImport.existing} already there</span>
+        {#if $activeImport.failed}<span class="text-red-400"><i class="ph ph-x mr-1"></i>{$activeImport.failed} not found</span>{/if}
+      </div>
+      {#if $activeImport.failures?.length}
+        <details class="text-xs text-kobser-muted mb-2">
+          <summary class="cursor-pointer">Couldn't find {$activeImport.failures.length} track{$activeImport.failures.length !== 1 ? 's' : ''}</summary>
+          <ul class="mt-2 max-h-32 overflow-y-auto list-disc pl-5">
+            {#each $activeImport.failures as f}<li>{f}</li>{/each}
+          </ul>
+        </details>
+      {/if}
+    {:else}
+      <p class="text-sm text-red-400 mb-3"><i class="ph ph-warning mr-1"></i>{$activeImport?.error || 'Import failed'}</p>
+    {/if}
+    <div class="flex justify-end mt-4">
+      {#if $activeImport?.status === 'running'}
+        <button on:click={hideImport} class="px-5 py-2.5 bg-kobser-accent hover:bg-kobser-accentHover text-kobser-bg rounded-xl text-sm font-semibold transition-colors">Run in background</button>
+      {:else}
+        <button on:click={finishImport} class="px-5 py-2.5 bg-kobser-accent hover:bg-kobser-accentHover text-kobser-bg rounded-xl text-sm font-semibold transition-colors">Done</button>
+      {/if}
+    </div>
+  {/if}
+</dialog>
+
+<!-- Re-entry pill: shows while an import is tracked but the dialog is closed -->
+{#if $activeImport && !importOpen}
+  <button on:click={reopenImport}
+    class="fixed bottom-24 right-6 z-40 flex items-center gap-2 px-4 py-3 rounded-full bg-kobser-surface border border-white/10 shadow-2xl hover:bg-white/10 transition-colors">
+    {#if $activeImport.status === 'running'}
+      <i class="ph ph-circle-notch text-kobser-accent animate-spin-slow"></i>
+      <span class="text-sm font-medium">Importing {$activeImport.current}/{$activeImport.total}</span>
+    {:else if $activeImport.status === 'done'}
+      <i class="ph-fill ph-check-circle text-kobser-success"></i>
+      <span class="text-sm font-medium">Import complete</span>
+    {:else}
+      <i class="ph-fill ph-warning-circle text-red-400"></i>
+      <span class="text-sm font-medium">Import failed</span>
+    {/if}
+  </button>
+{/if}

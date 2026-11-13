@@ -1,0 +1,221 @@
+import secrets
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+from config import KOBSER_DATA_DIR
+
+DB_PATH = Path(KOBSER_DATA_DIR) / "kobser.db"
+
+
+def init_db() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DB_PATH) as conn:
+        # Sessions from before the token schema stored the cleartext Navidrome
+        # password. If that old schema is found, drop the table so no plaintext
+        # stays on disk. Users log in again, and the new schema stores only a
+        # derived Subsonic (salt, token) pair plus the resolved library path.
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+        ).fetchone()
+        if existing:
+            scols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            if "token" not in scols:
+                conn.execute("DROP TABLE sessions")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                token TEXT NOT NULL,
+                library_path TEXT,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                expires_at INTEGER NOT NULL
+            )
+        """)
+        # Migrate token-schema DBs that predate the is_admin column. Existing
+        # sessions default to non-admin until the user logs in again.
+        scols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "is_admin" not in scols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        # Navidrome library id, for targeted (single-folder) scans. Older sessions
+        # leave it NULL and resolve it on demand (see navidrome_client).
+        if "library_id" not in scols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN library_id INTEGER")
+        # Drop sessions that have already expired. Reads filter them out anyway,
+        # but deleting them stops the table from collecting dead rows.
+        conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (int(time.time()),))
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS downloads (
+                id TEXT PRIMARY KEY,
+                video_id TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                title TEXT NOT NULL,
+                album TEXT,
+                source TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                file_path TEXT,
+                file_size_bytes INTEGER,
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER
+            )
+        """)
+        # Migrate older DBs that predate the album/source columns.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(downloads)").fetchall()}
+        if "album" not in cols:
+            conn.execute("ALTER TABLE downloads ADD COLUMN album TEXT")
+        if "source" not in cols:
+            conn.execute("ALTER TABLE downloads ADD COLUMN source TEXT")
+        # Downloads are now owned per user. The first run without this column is
+        # the migration point. Existing rows have no owner, so delete the old
+        # (globally visible) history.
+        if "username" not in cols:
+            conn.execute("ALTER TABLE downloads ADD COLUMN username TEXT")
+            conn.execute("DELETE FROM downloads")
+
+        # Job state is kept in memory (see jobs.py) and is lost on restart. Any row
+        # still marked in progress at startup was left by a previous process. Set
+        # it to error so it doesn't stay "downloading" forever, and so the UI
+        # offers a retry instead of polling a dead job.
+        conn.execute(
+            """
+            UPDATE downloads
+               SET status = 'error',
+                   error = 'interrupted by restart',
+                   completed_at = ?
+             WHERE status IN ('pending', 'downloading', 'tagging', 'scanning')
+            """,
+            (int(time.time()),),
+        )
+
+
+@contextmanager
+def _conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+SESSION_TTL_DAYS = 30
+# Sliding expiry. A session in use is renewed to the full TTL, at most once
+# per day, so the write doesn't happen on every request.
+_SESSION_RENEW_AFTER_S = 86400
+
+
+def create_session(
+    username: str, salt: str, token: str, library_path: str | None = None,
+    is_admin: bool = False, ttl_days: int = SESSION_TTL_DAYS,
+    library_id: int | None = None,
+) -> str:
+    sid = secrets.token_urlsafe(32)
+    expires_at = int(time.time()) + ttl_days * 86400
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO sessions (id, username, salt, token, library_path, is_admin, expires_at, library_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (sid, username, salt, token, library_path, int(is_admin), expires_at, library_id),
+        )
+    return sid
+
+
+def delete_expired_sessions() -> int:
+    """Purge sessions past their expiry. Returns the number removed."""
+    with _conn() as c:
+        cur = c.execute("DELETE FROM sessions WHERE expires_at <= ?", (int(time.time()),))
+        return cur.rowcount
+
+
+def get_session(sid: str) -> dict | None:
+    now = int(time.time())
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM sessions WHERE id = ? AND expires_at > ?",
+            (sid, now),
+        ).fetchone()
+        if row is None:
+            return None
+        s = dict(row)
+        full = now + SESSION_TTL_DAYS * 86400
+        if s["expires_at"] <= full - _SESSION_RENEW_AFTER_S:
+            c.execute("UPDATE sessions SET expires_at = ? WHERE id = ?", (full, sid))
+            s["expires_at"] = full
+    return s
+
+
+def delete_session(sid: str) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+
+
+# ── Downloads ────────────────────────────────────────────────────────────────
+
+def upsert_download(
+    id_: str,
+    video_id: str,
+    artist: str,
+    title: str,
+    status: str,
+    *,
+    username: str | None = None,
+    album: str | None = None,
+    source: str | None = None,
+    error: str | None = None,
+    file_path: str | None = None,
+    file_size_bytes: int | None = None,
+    started_at: int | None = None,
+    completed_at: int | None = None,
+) -> None:
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO downloads
+                (id, video_id, artist, title, username, album, source, status, error,
+                 file_path, file_size_bytes, started_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status          = excluded.status,
+                error           = excluded.error,
+                username        = COALESCE(excluded.username,        username),
+                album           = COALESCE(excluded.album,           album),
+                source          = COALESCE(excluded.source,          source),
+                file_path       = COALESCE(excluded.file_path,       file_path),
+                file_size_bytes = COALESCE(excluded.file_size_bytes, file_size_bytes),
+                completed_at    = COALESCE(excluded.completed_at,    completed_at)
+            """,
+            (
+                id_, video_id, artist, title, username, album, source, status, error,
+                file_path, file_size_bytes, started_at or int(time.time()), completed_at,
+            ),
+        )
+
+
+def list_downloads(username: str | None = None, is_admin: bool = False) -> list[dict]:
+    """List downloads for a user. Admins (or username=None) see everything."""
+    with _conn() as c:
+        if is_admin or username is None:
+            rows = c.execute(
+                "SELECT * FROM downloads ORDER BY started_at DESC LIMIT 200"
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM downloads WHERE username = ? ORDER BY started_at DESC LIMIT 200",
+                (username,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_download_record(id_: str) -> dict | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM downloads WHERE id = ?", (id_,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_download_record(id_: str) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM downloads WHERE id = ?", (id_,))

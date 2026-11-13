@@ -1,0 +1,127 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Tailwind v4 only applies `hover:` on devices that can hover. Some controls
+  (e.g. track-row actions) only appear on hover. On touch screens they can only
+  be reached through the v3 behaviour, where a tap triggers hover, so keep it.
+*/
+@custom-variant hover (&:hover);
+
+@theme {
+  --font-sans: Inter, system-ui, -apple-system, sans-serif;
+  --font-london: Manufacturing Consent, serif;
+
+  --color-kobser-bg: #121212;
+  --color-kobser-surface: #1e1e1e;
+  --color-kobser-accent: #ff9f1c;
+  --color-kobser-accentHover: #ffbf69;
+  --color-kobser-success: #2ec4b6;
+  --color-kobser-text: #ffffff;
+  --color-kobser-muted: #b3b3b3;
+
+  --animate-spin-slow: spin 1.5s linear infinite;
+  --animate-slide-up: slideUp 0.3s ease-out forwards;
+  --animate-bar1: musicBar 1s ease-in-out infinite;
+  --animate-bar2: musicBar 1s ease-in-out infinite 0.2s;
+  --animate-bar3: musicBar 1s ease-in-out infinite 0.4s;
+
+  @keyframes slideUp {
+    0% {
+      transform: translateY(100%);
+      opacity: 0;
+    }
+    100% {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+  @keyframes musicBar {
+    0%,
+    100% {
+      transform: scaleY(0.25);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+}
+
+/*
+  Tailwind CSS v4 changed the default border color to `currentcolor`. These
+  compatibility styles keep borders looking the same as in Tailwind CSS v3.
+
+  Before removing these styles, add an explicit border color utility to every
+  element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+
+  /* For v4 compatibility, keep the v3 defaults this UI was designed against. */
+
+  /* v4 no longer gives buttons a pointer cursor. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* v4 resets dialog margins, which un-centres every <dialog>. */
+  dialog {
+    margin: auto;
+  }
+
+  /* v4 placeholders default to 50% of the text colour. v3 used gray-400. */
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #121212; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+.user-select-none { user-select: none; -webkit-user-select: none; }
+
+/* Marquee scroll for overflowing track titles */
+@keyframes marquee-scroll {
+  0%, 10%  { transform: translateX(0); }
+  45%, 55% { transform: translateX(var(--marquee-px, 0px)); }
+  90%, 100%{ transform: translateX(0); }
+}
+.marquee-active {
+  display: inline-block;
+  animation: marquee-scroll 6s ease-in-out infinite;
+}
+
+@keyframes marquee-continuous {
+  from { transform: translateX(0); }
+  to   { transform: translateX(var(--mlp)); }
+}
+
+/* Layout */
+:root { --mob-nav-h: 60px; }
+
+@media (max-width: 767px) {
+  #mini-player {
+    bottom: calc(var(--mob-nav-h) + env(safe-area-inset-bottom, 0px));
+  }
+  #view {
+    padding-bottom: calc(var(--mob-nav-h) + env(safe-area-inset-bottom, 0px) + 8px);
+  }
+  body.player-visible #view {
+    padding-bottom: calc(var(--mob-nav-h) + env(safe-area-inset-bottom, 0px) + 90px + 8px);
+  }
+}

@@ -1,0 +1,242 @@
+import logging
+import re
+import unicodedata
+from pathlib import Path
+
+from anyio import to_thread
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, Field
+from yt_dlp.utils import DownloadError
+
+import db as _db
+from auth import get_current_session
+from jobs import cancel_job, create_job, get_job, is_cancelled, is_video_active, update_job
+from services import navidrome_client, tagger_service, ytdlp_service
+from services.ytdlp_service import DownloadCancelled
+
+
+def _norm(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+async def _is_duplicate(artist: str, title: str, username: str, salt: str, token: str) -> bool:
+    songs = await navidrome_client.search_songs(title, username, salt, token)
+    na, nt = _norm(artist), _norm(title)
+    return any(_norm(s.get("title", "")) == nt and _norm(s.get("artist", "")) == na for s in songs)
+
+router = APIRouter()
+log = logging.getLogger(__name__)
+
+
+def _can_access(owner: str | None, sess: dict) -> bool:
+    """A download is accessible to its owner, or to any admin."""
+    return bool(sess.get("is_admin")) or owner == sess["username"]
+
+
+class DownloadRequest(BaseModel):
+    videoId: str = Field(min_length=1)
+    artist: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    source: str = Field(default="youtube_music", pattern="^(youtube|youtube_music)$")
+    album: str = Field(default="")
+    force: bool = Field(default=False)
+
+
+@router.post("/api/download")
+async def download(
+    body: DownloadRequest,
+    bg: BackgroundTasks,
+    sess: dict = Depends(get_current_session),
+):
+    if is_video_active(body.videoId):
+        raise HTTPException(
+            status_code=409, detail="download already in progress for this video"
+        )
+    if not body.force and await _is_duplicate(
+        body.artist, body.title, sess["username"], sess["salt"], sess["token"]
+    ):
+        raise HTTPException(status_code=409, detail="already in library")
+    job = create_job(body.videoId, body.artist, body.title, sess["username"], body.album, body.source)
+    bg.add_task(
+        _run_download,
+        job.job_id,
+        body.videoId,
+        body.artist,
+        body.title,
+        sess["username"],
+        sess["salt"],
+        sess["token"],
+        sess.get("library_path"),
+        body.source,
+        body.album,
+        await navidrome_client.resolve_library_id(sess),
+    )
+    return {"jobId": job.job_id, "status": job.status}
+
+
+async def _run_download(
+    job_id: str,
+    video_id: str,
+    artist: str,
+    title: str,
+    username: str,
+    salt: str,
+    token: str,
+    library_path: str | None = None,
+    source: str = "youtube_music",
+    album: str = "",
+    library_id: int | None = None,
+) -> None:
+    try:
+        # The library path was resolved at login. Fall back to MUSIC_DIR if it's unset.
+        music_dir = library_path
+        # Navidrome reports its library path as seen inside its own container
+        # (e.g. /music). When the middleware runs in the same container, that path
+        # exists and is writable. In local dev the middleware runs on the host,
+        # where that path doesn't exist, so fall back to MUSIC_DIR, which is
+        # writable. In prod the path exists, so behaviour is unchanged.
+        if music_dir and not Path(music_dir).exists():
+            log.info("download %s: reported library %s missing on host, falling back to MUSIC_DIR", job_id, music_dir)
+            music_dir = None
+        if music_dir:
+            log.info("download %s: routing to user '%s' library %s", job_id, username, music_dir)
+
+        update_job(job_id, status="downloading")
+        file_path = await ytdlp_service.download_limited(
+            video_id, artist, title, source,
+            cancel_check=lambda: is_cancelled(job_id),
+            music_dir=music_dir,
+        )
+
+        if is_cancelled(job_id):
+            return
+
+        final_album = album.strip() or "Singles"
+        update_job(job_id, status="tagging", file=file_path)
+        await to_thread.run_sync(tagger_service.tag, file_path, artist, title, final_album)
+        # Collect songs that already match these tags (a forced re-download), so
+        # the wait below only succeeds once the new file is indexed.
+        try:
+            known_ids = await navidrome_client.matching_song_ids(artist, title, username, salt, token)
+        except Exception:
+            known_ids = set()
+
+        if is_cancelled(job_id):
+            return
+
+        update_job(job_id, status="scanning")
+        # Rescan only the folder we wrote to, and report "done" only once the song
+        # is searchable, so the client's refresh finds it.
+        targets = None
+        if music_dir and library_id is not None:
+            t = navidrome_client.scan_target(library_id, music_dir, Path(file_path).parent)
+            targets = [t] if t else None
+        await navidrome_client.scan_until(
+            username, salt, token,
+            done=lambda: navidrome_client.new_song_visible(artist, title, known_ids, username, salt, token),
+            targets=targets,
+        )
+
+        update_job(job_id, status="done")
+    except DownloadCancelled:
+        pass  # cancel_job already set the status
+    except DownloadError as e:
+        reason = ytdlp_service.describe_error(e)
+        log.warning("download job %s failed: %s", job_id, reason)
+        update_job(job_id, status="error", error=reason)
+    except Exception as e:
+        # Unexpected error (our bug, Navidrome, network), so log the traceback.
+        log.exception("download job %s crashed", job_id)
+        update_job(job_id, status="error", error=ytdlp_service.describe_error(e))
+
+
+@router.get("/api/status/{job_id}")
+async def status(job_id: str, sess: dict = Depends(get_current_session)):
+    job = get_job(job_id)
+    if job is not None:
+        if not _can_access(job.username, sess):
+            raise HTTPException(status_code=404, detail="job not found")
+        return {
+            "jobId": job.job_id,
+            "status": job.status,
+            "error": job.error,
+            "file": job.file,
+        }
+    # In-memory job is gone (e.g. process restarted). Fall back to the persisted
+    # record so the client sees the final status instead of a spurious 404.
+    rec = _db.get_download_record(job_id)
+    if rec is None or not _can_access(rec["username"], sess):
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "jobId": rec["id"],
+        "status": rec["status"],
+        "error": rec["error"],
+        "file": rec["file_path"],
+    }
+
+
+@router.post("/api/rescan")
+async def rescan(sess: dict = Depends(get_current_session)):
+    await navidrome_client.trigger_scan_and_wait(sess["username"], sess["salt"], sess["token"])
+    return {"ok": True}
+
+
+@router.post("/api/jobs/{job_id}/cancel")
+def cancel_job_endpoint(job_id: str, sess: dict = Depends(get_current_session)):
+    job = get_job(job_id)
+    if job is None or not _can_access(job.username, sess):
+        raise HTTPException(status_code=404, detail="job not found or already finished")
+    if not cancel_job(job_id):
+        raise HTTPException(status_code=404, detail="job not found or already finished")
+    return {"ok": True}
+
+
+@router.get("/api/downloads")
+def list_downloads(sess: dict = Depends(get_current_session)):
+    return {"downloads": _db.list_downloads(sess["username"], bool(sess.get("is_admin")))}
+
+
+@router.delete("/api/downloads/{job_id}")
+def delete_download(job_id: str, sess: dict = Depends(get_current_session)):
+    rec = _db.get_download_record(job_id)
+    if rec is None or not _can_access(rec["username"], sess):
+        raise HTTPException(status_code=404, detail="download not found")
+    _db.delete_download_record(job_id)
+    return {"ok": True}
+
+
+@router.post("/api/downloads/{job_id}/retry")
+async def retry_download(
+    job_id: str,
+    bg: BackgroundTasks,
+    sess: dict = Depends(get_current_session),
+):
+    rec = _db.get_download_record(job_id)
+    if rec is None or not _can_access(rec["username"], sess):
+        raise HTTPException(status_code=404, detail="download not found")
+    if is_video_active(rec["video_id"]):
+        raise HTTPException(status_code=409, detail="download already in progress for this video")
+
+    source = rec.get("source") or "youtube_music"
+    album = rec.get("album") or ""
+    # Re-run as a fresh job owned by the caller (it uses their credentials and
+    # library), then drop the old record so the list shows a single entry
+    # that's downloading again.
+    job = create_job(rec["video_id"], rec["artist"], rec["title"], sess["username"], album, source)
+    _db.delete_download_record(job_id)
+    bg.add_task(
+        _run_download,
+        job.job_id,
+        rec["video_id"],
+        rec["artist"],
+        rec["title"],
+        sess["username"],
+        sess["salt"],
+        sess["token"],
+        sess.get("library_path"),
+        source,
+        album,
+        await navidrome_client.resolve_library_id(sess),
+    )
+    return {"jobId": job.job_id, "status": job.status}

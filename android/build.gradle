@@ -1,0 +1,23 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // AGP's built-in Kotlin ships with KGP 2.2.10. Lift it to the Kotlin that
+        // KSP 2.3.12 and Hilt 2.60 are built against (the documented upgrade path).
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.21'
+    }
+}
+
+plugins {
+    id 'com.android.application' version '9.4.0' apply false
+    // Still required with built-in Kotlin. Its version must match the KGP version above.
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.3.21' apply false
+    id 'com.google.devtools.ksp' version '2.3.12' apply false
+    id 'com.google.dagger.hilt.android' version '2.60.1' apply false
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}

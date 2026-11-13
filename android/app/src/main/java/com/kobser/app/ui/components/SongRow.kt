@@ -1,0 +1,243 @@
+package com.kobser.app.ui.components
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.DownloadForOffline
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.HeartBroken
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.util.fastForEach
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import androidx.compose.ui.platform.LocalContext
+import com.kobser.app.data.api.Song
+
+/**
+ * Song row used by Library, Favorites, Album detail and Playlist detail.
+ *
+ * Each screen passes its own callbacks for the actions. They usually call a
+ * ViewModel that uses LibraryRepository and MusicPlayer.
+ */
+@Composable
+fun SongRow(
+    song: Song,
+    isStarred: Boolean,
+    getCoverUrl: (String) -> String,
+    onClick: () -> Unit,
+    onToggleStar: () -> Unit,
+    onAddToQueue: () -> Unit,
+    onPlay: () -> Unit,
+    onDelete: () -> Unit,
+    onAddToPlaylist: (() -> Unit)? = null,
+    extraMenuItems: List<MenuAction> = emptyList(),
+    isCurrent: Boolean = false,
+    isPlayingNow: Boolean = false,
+    offline: OfflineSongAction? = null,
+) {
+    val coverUrl = remember(song.coverArt) { song.coverArt?.let { getCoverUrl(it) } }
+
+    var menuOpen by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(72.dp) // Fixed height helps LazyColumn measure items
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(modifier = Modifier.size(52.dp)) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(coverUrl)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                contentScale = ContentScale.Crop,
+            )
+            if (isCurrent) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.Black.copy(alpha = 0.5f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (isPlayingNow) {
+                        NowPlayingBars(
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.height(16.dp),
+                        )
+                    } else {
+                        Icon(
+                            Icons.Filled.GraphicEq,
+                            contentDescription = "Now playing",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            MarqueeText(
+                text = song.title,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Small "on this phone" marker, so it's clear what plays without a connection.
+                if (offline != null && offline.state != com.kobser.app.offline.OfflineSongState.NONE) {
+                    Icon(
+                        Icons.Default.DownloadDone,
+                        contentDescription = "On this phone",
+                        tint = if (offline.state == com.kobser.app.offline.OfflineSongState.DOWNLOADING)
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                        else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
+                MarqueeText(
+                    text = song.artist,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                )
+            }
+        }
+        IconButton(
+            onClick = onToggleStar,
+            modifier = Modifier.minimumInteractiveComponentSize()
+        ) {
+            Icon(
+                imageVector = if (isStarred) Icons.Default.Favorite else Icons.Outlined.FavoriteBorder,
+                contentDescription = if (isStarred) "Unlike" else "Like",
+                tint = if (isStarred) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+            )
+        }
+        Box {
+            IconButton(
+                onClick = { menuOpen = true },
+                modifier = Modifier.minimumInteractiveComponentSize()
+            ) {
+                Icon(
+                    Icons.Default.MoreVert,
+                    contentDescription = "More options",
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                )
+            }
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Play") },
+                    leadingIcon = { Icon(Icons.Default.PlayArrow, null) },
+                    onClick = { menuOpen = false; onPlay() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Add to queue") },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.QueueMusic, null) },
+                    onClick = { menuOpen = false; onAddToQueue() },
+                )
+                if (onAddToPlaylist != null) {
+                    DropdownMenuItem(
+                        text = { Text("Add to playlist") },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, null) },
+                        onClick = { menuOpen = false; onAddToPlaylist() },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text(if (isStarred) "Unlike" else "Like") },
+                    leadingIcon = {
+                        Icon(
+                            if (isStarred) Icons.Default.HeartBroken else Icons.Default.Favorite,
+                            null,
+                        )
+                    },
+                    onClick = { menuOpen = false; onToggleStar() },
+                )
+                if (offline != null) {
+                    val (label, enabled) = when (offline.state) {
+                        com.kobser.app.offline.OfflineSongState.NONE -> "Download to phone" to true
+                        com.kobser.app.offline.OfflineSongState.DOWNLOADING -> "Downloading to phone… (tap to cancel)" to true
+                        com.kobser.app.offline.OfflineSongState.DOWNLOADED -> "Remove from phone" to true
+                        com.kobser.app.offline.OfflineSongState.IN_COLLECTION -> "On phone (in a kept album or playlist)" to false
+                    }
+                    DropdownMenuItem(
+                        text = { Text(label) },
+                        leadingIcon = {
+                            Icon(
+                                if (offline.state == com.kobser.app.offline.OfflineSongState.NONE) Icons.Default.DownloadForOffline
+                                else Icons.Default.DownloadDone,
+                                null,
+                            )
+                        },
+                        enabled = enabled,
+                        onClick = { menuOpen = false; offline.onToggle() },
+                    )
+                }
+                extraMenuItems.fastForEach { extra ->
+                    DropdownMenuItem(
+                        text = { Text(extra.label) },
+                        leadingIcon = extra.icon?.let { { Icon(it, null) } },
+                        onClick = { menuOpen = false; extra.onClick() },
+                    )
+                }
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            "Delete from library",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Delete,
+                            null,
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    },
+                    onClick = { menuOpen = false; onDelete() },
+                )
+            }
+        }
+    }
+}
+
+/** "Download to phone" / "Remove from phone" for a song row. */
+data class OfflineSongAction(
+    val state: com.kobser.app.offline.OfflineSongState,
+    val onToggle: () -> Unit,
+)
+
+data class MenuAction(
+    val label: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    val onClick: () -> Unit,
+)

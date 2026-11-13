@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.pytest_cache
+.git
+node_modules
+
+# Local runtime and build artifacts. Never bake these into the image.
+data
+static
+frontend/dist
+.env
+secrets

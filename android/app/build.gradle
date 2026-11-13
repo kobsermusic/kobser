@@ -1,0 +1,132 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.plugin.compose'
+    id 'com.google.devtools.ksp'
+    id 'com.google.dagger.hilt.android'
+}
+
+// ── Signing ──────────────────────────────────────────────────────────────────
+// One stable key signs every build (CI release builds and local Studio builds), so
+// any APK can be installed over any other. Android refuses to update an app whose
+// signature changed, and per-machine debug keys give each machine its own signature.
+// Local builds read the key from the gitignored android/keystore.properties, and CI
+// reads it from the KOBSER_KEYSTORE_* env vars.
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file("keystore.properties")
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+def signingStoreFile = keystoreProps.getProperty("storeFile") ?: System.getenv("KOBSER_KEYSTORE_FILE")
+def signingStorePassword = keystoreProps.getProperty("storePassword") ?: System.getenv("KOBSER_KEYSTORE_PASSWORD")
+def signingKeyAlias = keystoreProps.getProperty("keyAlias") ?: System.getenv("KOBSER_KEY_ALIAS")
+def signingKeyPassword = keystoreProps.getProperty("keyPassword") ?: System.getenv("KOBSER_KEY_PASSWORD") ?: signingStorePassword
+def hasSigningKey = signingStoreFile != null && signingStorePassword != null && signingKeyAlias != null
+
+// Kotlin and the Compose compiler come from AGP's built-in Kotlin support (AGP 9+).
+// jvmTarget follows compileOptions.targetCompatibility.
+android {
+    namespace = 'com.kobser.app'
+    compileSdk = 37
+
+    defaultConfig {
+        applicationId = "com.kobser.app"
+        minSdk = 26
+        targetSdk = 36
+        versionCode = 4
+        versionName = "1.3.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        vectorDrawables {
+            useSupportLibrary = true
+        }
+    }
+
+    signingConfigs {
+        if (hasSigningKey) {
+            create("kobser") {
+                storeFile = rootProject.file(signingStoreFile)
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = false
+            proguardFiles(getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
+            if (hasSigningKey) signingConfig = signingConfigs.kobser
+        }
+        debug {
+            // Use the release key when it's available, so a Studio install can update
+            // a downloaded build and the other way round.
+            if (hasSigningKey) signingConfig = signingConfigs.kobser
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+    packaging {
+        resources {
+            excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.19.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.11.0'
+    implementation 'androidx.activity:activity-compose:1.13.0'
+    implementation platform('androidx.compose:compose-bom:2026.09.00')
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+
+    // Navigation
+    implementation "androidx.navigation:navigation-compose:2.10.1"
+
+    // Drag-to-reorder lists (queue)
+    implementation "sh.calvin.reorderable:reorderable:2.5.1"
+
+    // Media3
+    implementation "androidx.media3:media3-exoplayer:1.11.1"
+    implementation "androidx.media3:media3-session:1.11.1"
+    implementation "androidx.media3:media3-ui:1.11.1"
+
+    // Networking
+    implementation "com.squareup.retrofit2:retrofit:3.0.0"
+    implementation "com.squareup.retrofit2:converter-gson:3.0.0"
+    implementation "com.squareup.okhttp3:logging-interceptor:5.5.0"
+
+    // Hilt
+    implementation "com.google.dagger:hilt-android:2.60.1"
+    ksp "com.google.dagger:hilt-compiler:2.60.1"
+    implementation 'androidx.hilt:hilt-navigation-compose:1.4.0'
+    implementation 'androidx.hilt:hilt-lifecycle-viewmodel-compose:1.4.0'
+
+    // Image loading
+    implementation "io.coil-kt:coil-compose:2.7.0"
+
+    // Guava for Media3 futures
+    implementation "com.google.guava:guava:33.7.1-android"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.11.0"
+
+    // DataStore
+    implementation "androidx.datastore:datastore-preferences:1.2.1"
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.3.0'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.7.0'
+    androidTestImplementation platform('androidx.compose:compose-bom:2026.09.00')
+    androidTestImplementation 'androidx.compose.ui:ui-test-junit4'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+    debugImplementation 'androidx.compose.ui:ui-test-manifest'
+}

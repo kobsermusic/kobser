@@ -1,0 +1,33 @@
+# Build outputs
+build/
+app/build/
+
+# Gradle cache and the wrapper jar (only gradle-wrapper.properties is committed)
+.gradle/
+gradle/wrapper/gradle-wrapper.jar
+
+# Kotlin compiler scratch/daemon output
+.kotlin/
+
+# Local config (machine-specific)
+local.properties
+
+# Signing material and build artifacts. Never commit these.
+*.apk
+*.aab
+*.keystore
+*.jks
+keystore.properties
+
+# IDE
+.idea/
+*.iml
+
+# JVM crash dumps
+*.hprof
+
+# Android Studio Navigation editor temp files
+.navigation/
+
+# Generated files
+app/src/main/assets/flutter_assets/

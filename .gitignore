@@ -1,0 +1,28 @@
+# Local config
+.env
+dev.sh
+docker-compose.override.yml
+
+# Secrets (keep the example file, ignore everything else in secrets/)
+secrets/
+!secrets/cookies.txt.example
+
+# Bind-mounted data (top level only, because Android has its own data/ source package)
+/data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Local notes (not committed)
+NOTES*.md
+notes/
